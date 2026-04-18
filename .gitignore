@@ -1,0 +1,25 @@
+# Node modules
+node_modules/
+electron/node_modules/
+
+# Build files
+dist/
+build/
+
+# Environment files
+.env
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Electron binaries
+*.exe
+*.dll
+
+# VS Code
+.vscode/

@@ -1,0 +1,39 @@
+{
+  "name": "productivity-telemetry-electron",
+  "version": "1.0.0",
+  "description": "Electron wrapper for Productivity Telemetry dashboard",
+  "main": "main.js",
+  "scripts": {
+    "electron": "electron .",
+    "electron:dev": "concurrently \"cd ../dashboard && npm run dev\" \"wait-on http://localhost:3000 && electron .\"",
+    "electron:build": "electron-builder"
+  },
+  "dependencies": {
+    "active-win": "^8.1.0",
+    "electron-store": "^8.2.0"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "electron": "^29.4.6",
+    "electron-builder": "^24.9.1",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.yourname.productivity-telemetry",
+    "productName": "Productivity Telemetry",
+    "directories": {
+      "output": "dist"
+    },
+    "mac": {
+      "category": "public.app-category.productivity",
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "win": {
+      "target": "nsis"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}
