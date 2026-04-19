@@ -82,9 +82,77 @@
     }, 2000);
   }
 
-  document.addEventListener('click',  reportInteraction, { passive: true });
-  document.addEventListener('keydown', reportInteraction, { passive: true });
-  document.addEventListener('scroll', reportInteraction, { passive: true });
+  // NEW: Send detailed behavioral signals for distraction detection
+  function sendBehaviorSignal(signalType) {
+    try {
+      if (!chrome.runtime?.id) { contextInvalidated = true; return; }
+      chrome.runtime.sendMessage({ type: signalType }).catch(() => {});
+    } catch (err) {
+      if (err.message?.includes('Extension context invalidated')) contextInvalidated = true;
+    }
+  }
+
+  // Track individual interaction types with debouncing
+  let clickThrottle = null;
+  let scrollThrottle = null;
+  let keyThrottle = null;
+
+  document.addEventListener('click', () => {
+    sendBehaviorSignal('CLICK');
+    if (!clickThrottle) {
+      clickThrottle = setTimeout(() => { clickThrottle = null; }, 500);
+      reportInteraction();
+    }
+  }, { passive: true });
+
+  document.addEventListener('keydown', () => {
+    sendBehaviorSignal('KEY');
+    if (!keyThrottle) {
+      keyThrottle = setTimeout(() => { keyThrottle = null; }, 500);
+      reportInteraction();
+    }
+  }, { passive: true });
+
+  document.addEventListener('scroll', () => {
+    sendBehaviorSignal('SCROLL');
+    if (!scrollThrottle) {
+      scrollThrottle = setTimeout(() => { scrollThrottle = null; }, 500);
+      reportInteraction();
+    }
+  }, { passive: true });
+
+  // NEW: Idle detection (no user interaction for 30+ seconds)
+  let lastInteractionTime = Date.now();
+  let idleCheckTimer = null;
+
+  function resetIdleTimer() {
+    lastInteractionTime = Date.now();
+    if (idleCheckTimer) clearInterval(idleCheckTimer);
+
+    idleCheckTimer = setInterval(() => {
+      const timeSinceInteraction = Date.now() - lastInteractionTime;
+      if (timeSinceInteraction > 30000) { // 30 seconds
+        try {
+          if (!chrome.runtime?.id) return;
+          chrome.runtime.sendMessage({
+            type: 'IDLE_DETECTED',
+            idleSeconds: Math.floor(timeSinceInteraction / 1000),
+          }).catch(() => {});
+        } catch (err) {
+          // context invalidated
+        }
+      }
+    }, 5000); // check every 5 seconds
+  }
+
+  // Wire idle timer to all interaction events
+  document.addEventListener('click', resetIdleTimer, { passive: true });
+  document.addEventListener('keydown', resetIdleTimer, { passive: true });
+  document.addEventListener('scroll', resetIdleTimer, { passive: true });
+  document.addEventListener('mousemove', resetIdleTimer, { passive: true });
+
+  // Initialize timer
+  resetIdleTimer();
 
   // ── Styles (unchanged) ──────────────────────────────────────────────────────
   function injectStyles() {
@@ -527,11 +595,23 @@
 
   // ── SPA Navigation Detection ───────────────────────────────────────────────
   let lastUrl = location.href;
+  let lastHostname = hostname;
 
   function onUrlChange() {
     const newUrl = location.href;
     if (newUrl === lastUrl) return;
     lastUrl = newUrl;
+
+    // ━━━ NEW: Track site exits for distraction detector ━━━━━━━━━━━━━━━━━━━━
+    const newHostname = window.location.hostname.replace(/^www\./, '');
+    if (newHostname !== lastHostname) {
+      if (window.DistractionDetector) {
+        window.DistractionDetector.onLeaveSite(newHostname);
+      }
+      lastHostname = newHostname;
+    }
+    // ━━━ END NEW ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
     setTimeout(runFocusCheck, 300);
   }
 
@@ -553,11 +633,31 @@
   }
 
   // ── Initial page load ──────────────────────────────────────────────────────
+  // Send PAGE_LOAD signal for distraction detection
+  function initPageTracking() {
+    try {
+      if (!chrome.runtime?.id) { contextInvalidated = true; return; }
+      chrome.runtime.sendMessage({ type: 'PAGE_LOAD' }).catch(() => {});
+    } catch (err) {
+      if (err.message?.includes('Extension context invalidated')) contextInvalidated = true;
+    }
+    
+    // ━━━ NEW: Smart Distraction Detection ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    if (window.DistractionDetector && DISTRACTING.has(hostname)) {
+      const pageTitle = document.title || '';
+      console.log(`[DistractionDetector] Entered distracting site: ${hostname}`);
+      window.DistractionDetector.onEnterDistractingSite(hostname, pageTitle);
+    }
+    // ━━━ END NEW ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+    
+    runFocusCheck();
+  }
+
   // document_start runs before <body> exists — wait for it before injecting DOM.
   if (document.body) {
-    runFocusCheck();
+    initPageTracking();
   } else {
-    document.addEventListener('DOMContentLoaded', runFocusCheck, { once: true });
+    document.addEventListener('DOMContentLoaded', initPageTracking, { once: true });
   }
 
   // ── Message Listener ──────────────────────────────────────────────────────
@@ -568,6 +668,29 @@
       case 'FOCUS_ENDED':       removeToast(); removeBlockOverlay(); break;
       // [ADDED] background can push an intervention explicitly
       case 'SHOW_INTERVENTION': playAlertSound(); showInterventionPopup(msg.site || hostname); break;
+
+      // ━━━ NEW: Smart Distraction Warning Popups ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+      case 'SHOW_DISTRACTION_WARNING': {
+        const { warningLevel, site, title, reason } = msg;
+        
+        if (!window.WarningRenderer) {
+          console.error('[WarningRenderer] Not loaded yet');
+          break;
+        }
+
+        // Show appropriate warning level
+        if (warningLevel === 'soft') {
+          window.WarningRenderer.showSoftWarning(site);
+        } else if (warningLevel === 'strong') {
+          window.WarningRenderer.showStrongWarning(site);
+        } else if (warningLevel === 'persistent') {
+          window.WarningRenderer.showPersistentWarning(site);
+        }
+
+        console.log(`[DistractionDetector] Showing ${warningLevel} warning for ${site} (reason: ${reason})`);
+        break;
+      }
+      // ━━━ END NEW ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     }
   });
 

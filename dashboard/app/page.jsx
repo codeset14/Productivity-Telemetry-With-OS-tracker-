@@ -12,6 +12,13 @@ import InsightAssistant from './components/InsightAssistant';
 import FocusModePanel   from './components/FocusModePanel';
 import SettingsPanel    from './components/SettingsPanel';
 import SessionHistory   from './components/SessionHistory';
+import FocusStateIndicator   from './components/FocusStateIndicator';
+import FocusTimeline         from './components/FocusTimeline';
+import FocusConsistencyCard  from './components/FocusConsistencyCard';
+import InterventionOverlay   from './components/InterventionOverlay';
+import DistractionMetricsCard   from './components/DistractionMetricsCard';
+import BehaviorPatternsCard     from './components/BehaviorPatternsCard';
+import AdaptiveThresholdsCard   from './components/AdaptiveThresholdsCard';
 
 function Loader() {
   return (
@@ -77,6 +84,11 @@ export default function DashboardPage() {
     data, report, range, isLoading,
     demoActive, hasRealData,
     focusSettings, darkMode, activeTab, setActiveTab, init, refresh, clearDemo,
+    currentFocusState, focusTimeline, consistencyData,
+    // [NEW] Distraction tracking state
+    warningState, recoveryStats, distractionPatterns, distractionTimeline,
+    adaptiveThresholds, distractionDetectionSettings,
+    dismissDistractionWarning, transitionDistractionState,
   } = useFocusStore();
 
   // ─── [ADDED] Popup state ──────────────────────────────────────────────────
@@ -89,6 +101,25 @@ export default function DashboardPage() {
     setActiveTab('focus');
   }, [setActiveTab]);
 
+  // ─── [NEW] Handle warning dismissal ───────────────────────────────────────
+  const handleWarningDismiss = useCallback(() => {
+    dismissDistractionWarning();
+  }, [dismissDistractionWarning]);
+
+  // ─── [NEW] Handle return to work ──────────────────────────────────────────
+  const handleReturnToWork = useCallback(() => {
+    // Update state to FOCUSED to reset the warning
+    transitionDistractionState('FOCUSED');
+    dismissDistractionWarning();
+  }, [transitionDistractionState, dismissDistractionWarning]);
+
+  // ─── [NEW] Handle take break ──────────────────────────────────────────────
+  const handleTakeBreak = useCallback(() => {
+    // End current focus session
+    dismissDistractionWarning();
+    setActiveTab('dashboard');
+  }, [dismissDistractionWarning, setActiveTab]);
+
   useEffect(() => {
     // Only subscribe if running inside Electron
     if (typeof window === 'undefined') return;
@@ -98,7 +129,6 @@ export default function DashboardPage() {
       setPopupData(data);
     });
   }, []);
-  // ─── [END ADDED] ──────────────────────────────────────────────────────────
 
   useEffect(() => { init(); }, []);
 
@@ -114,6 +144,18 @@ export default function DashboardPage() {
     <div className="app">
       {/* [ADDED] Distraction popup — rendered above everything, zero impact on layout */}
       <DistractionPopup data={popupData} onDismiss={handleDismiss} onFocus={handleFocus} />
+
+      {/* [NEW] Distraction Warning Overlay ─────────────────────────────────────── */}
+      <InterventionOverlay
+        active={warningState.active}
+        level={warningState.level}
+        message={warningState.message}
+        reasons={warningState.reasons || []}
+        onDismiss={handleWarningDismiss}
+        onReturn={handleReturnToWork}
+        onTakeBreak={handleTakeBreak}
+        showReasons={distractionDetectionSettings.showReasons !== false}
+      />
 
       <Header />
 
@@ -186,6 +228,27 @@ export default function DashboardPage() {
             <div className="grid-2">
               <TopSites data={data} />
               <InsightAssistant report={report} data={data} />
+            </div>
+
+            {/* Focus Intelligence Engine */}
+            <FocusStateIndicator state={currentFocusState} />
+
+            <div className="grid-2">
+              <FocusConsistencyCard consistencyData={consistencyData} />
+              <FocusTimeline timeline={focusTimeline} />
+            </div>
+
+            {/* [NEW] Distraction Detection Cards ──────────────────────────────────── */}
+            <div className="grid-3">
+              <DistractionMetricsCard
+                recoveryStats={recoveryStats}
+                distractionTimeline={distractionTimeline}
+              />
+              <BehaviorPatternsCard patterns={distractionPatterns} />
+              <AdaptiveThresholdsCard
+                adaptiveThresholds={adaptiveThresholds}
+                confidence={distractionPatterns.confidence || 0}
+              />
             </div>
 
             {/* Setup guide */}

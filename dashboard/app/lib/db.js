@@ -1,11 +1,12 @@
 /**
- * db.js — IndexedDB wrapper (v2)
- * Schema v2 adds: sessions, focus_events, settings, user_labels
+ * db.js — IndexedDB wrapper (v4)
+ * Schema v4 adds: focus_states (v4 extended), distraction_events
+ * v2 adds: sessions, focus_events, settings, user_labels
  * Shared between Chrome extension and dashboard.
  */
 
 const DB_NAME = 'focus_tracker_db';
-const DB_VERSION = 2;
+const DB_VERSION = 4;
 
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -41,6 +42,25 @@ function openDB() {
         }
         if (!db.objectStoreNames.contains('user_labels')) {
           db.createObjectStore('user_labels', { keyPath: 'site' });
+        }
+      }
+
+      // v3: focus_states (Focus Intelligence Engine)
+      if (prev < 3) {
+        if (!db.objectStoreNames.contains('focus_states')) {
+          const fs = db.createObjectStore('focus_states', { keyPath: 'id', autoIncrement: true });
+          fs.createIndex('timestamp', 'timestamp');
+          fs.createIndex('state', 'state');
+        }
+      }
+
+      // v4: distraction_events (Distraction Detection Engine)
+      if (prev < 4) {
+        if (!db.objectStoreNames.contains('distraction_events')) {
+          const de = db.createObjectStore('distraction_events', { keyPath: 'id', autoIncrement: true });
+          de.createIndex('timestamp', 'timestamp');
+          de.createIndex('eventType', 'eventType');
+          de.createIndex('sessionId', 'sessionId');
         }
       }
     };
@@ -314,6 +334,107 @@ export async function removeUserLabel(site) {
   return new Promise((resolve, reject) => {
     const t = db.transaction('user_labels', 'readwrite');
     t.objectStore('user_labels').delete(site);
+    t.oncomplete = () => { db.close(); resolve(); };
+    t.onerror = () => { db.close(); reject(t.error); };
+  });
+}
+
+// ─── Focus States (Focus Intelligence Engine) ─────────────────────────────
+
+export async function addFocusState(entry) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction('focus_states', 'readwrite');
+    const req = t.objectStore('focus_states').add(entry);
+    t.oncomplete = () => { db.close(); resolve(req.result); };
+    t.onerror = () => { db.close(); reject(t.error); };
+  });
+}
+
+export async function getFocusTimeline(startDate, endDate) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction('focus_states', 'readonly');
+    const req = t.objectStore('focus_states').getAll();
+    req.onsuccess = () => {
+      const all = req.result || [];
+      const filtered = all.filter(s => {
+        const ts = new Date(s.timestamp).getTime();
+        return ts >= startDate.getTime() && ts <= endDate.getTime();
+      });
+      db.close();
+      resolve(filtered.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp)));
+    };
+    req.onerror = () => { db.close(); reject(req.error); };
+  });
+}
+
+/**
+ * Returns the most recent N activity_log entries, sorted newest-first.
+ * Used by the behavior engine as the sliding window input.
+ */
+export async function getRecentLogs(limit = 5) {
+  const all = await getAllLogs();
+  return all
+    .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+    .slice(0, limit);
+}
+
+// ─── Distraction Events (Distraction Detection Engine) ──────────────────────
+
+export async function addDistractionEvent(event) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction('distraction_events', 'readwrite');
+    const fullEvent = { 
+      ...event, 
+      timestamp: event.timestamp || new Date().toISOString() 
+    };
+    const req = t.objectStore('distraction_events').add(fullEvent);
+    t.oncomplete = () => { db.close(); resolve(req.result); };
+    t.onerror = () => { db.close(); reject(t.error); };
+  });
+}
+
+export async function getDistractionEvents(startDate, endDate) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction('distraction_events', 'readonly');
+    const req = t.objectStore('distraction_events').getAll();
+    req.onsuccess = () => {
+      const all = req.result || [];
+      const filtered = all.filter(e => {
+        const ts = new Date(e.timestamp).getTime();
+        return ts >= startDate.getTime() && ts <= endDate.getTime();
+      });
+      db.close();
+      resolve(filtered.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp)));
+    };
+    req.onerror = () => { db.close(); reject(req.error); };
+  });
+}
+
+export async function getRecentDistractionEvents(limit = 50) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction('distraction_events', 'readonly');
+    const req = t.objectStore('distraction_events').getAll();
+    req.onsuccess = () => {
+      const sorted = (req.result || [])
+        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+        .slice(0, limit);
+      db.close();
+      resolve(sorted);
+    };
+    req.onerror = () => { db.close(); reject(req.error); };
+  });
+}
+
+export async function clearDistractionEvents() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const t = db.transaction('distraction_events', 'readwrite');
+    t.objectStore('distraction_events').clear();
     t.oncomplete = () => { db.close(); resolve(); };
     t.onerror = () => { db.close(); reject(t.error); };
   });

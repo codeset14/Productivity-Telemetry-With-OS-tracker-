@@ -166,11 +166,20 @@ export function processLogs(logs) {
     end:   timestamps[timestamps.length - 1].slice(0, 10),
   };
 
+  // 8. Focus state breakdown (from enriched logs)
+  const focusStateBreakdown = { deep_focus: 0, drifting: 0, distracted: 0, unknown: 0 };
+  for (const log of logs) {
+    const fs = log.focusState;
+    if (fs && focusStateBreakdown[fs] !== undefined) focusStateBreakdown[fs]++;
+    else focusStateBreakdown.unknown++;
+  }
+
   return {
     totalTime, productiveTime, distractingTime, neutralTime,
     focusScore, topSites, topProductiveSites, topDistractingSites,
     hourlyBreakdown, dailyBreakdown,
     peakDistractionWindow, peakProductiveWindow,
+    focusStateBreakdown,
     logCount: logs.length,
     dateRange,
   };
@@ -189,5 +198,120 @@ export function emptyData() {
     peakDistractionWindow: null, peakProductiveWindow: null,
     logCount: 0,
     dateRange: { start: '', end: '' },
+  };
+}
+
+// ─── Distraction Detection Integration ─────────────────────────────────────────
+
+/**
+ * Process a session with behavioral signals through the distraction detection engine.
+ * Used when a focus session ends to compute distraction state and metrics.
+ *
+ * Input session format:
+ * {
+ *   site, duration, category,
+ *   interactions, tabSwitches,
+ *   clicks, scrolls, keys, pageLoads, idleTime, repeatVisits
+ * }
+ *
+ * Returns focus state object for storage in focus_states store.
+ */
+export function processSessionThroughBehaviorEngine(session, thresholds = null) {
+  // Lazy import to avoid circular dependencies
+  const engine = require('./focusBehaviorEngine');
+  
+  // Build metrics from session signals
+  const metrics = engine.aggregateSignalsToMetrics(
+    {
+      contextSwitches: session.tabSwitches || 0,
+      idleTime: session.idleTime || 0,
+      interactions: session.interactions || 0,
+      scrollEvents: session.scrolls || 0,
+      pageLoads: session.pageLoads || 0,
+      sessionCoherence: 0.7, // default, would be computed from site diversity
+      repeatVisits: session.repeatVisits || 0,
+    },
+    session.duration
+  );
+
+  // Use adaptive thresholds if provided, otherwise use base
+  const appliedThresholds = thresholds || engine.BASE_THRESHOLDS;
+
+  // Evaluate state (start from focused, evaluate once for the session)
+  const state = engine.evaluateStateTransition(
+    'focused',
+    metrics,
+    appliedThresholds,
+    session.duration
+  );
+
+  // Compute focus score
+  const { score, confidence, reasons } = engine.computeFocusScore(state, metrics);
+
+  return {
+    state,
+    score,
+    confidence,
+    reasons,
+    signals: metrics,
+    thresholds: appliedThresholds,
+    sessionDuration: session.duration,
+    timestamp: new Date().toISOString(),
+  };
+}
+
+/**
+ * Compute behavioral patterns from a list of focus states.
+ * Returns analysis of peak distraction times, common triggers, etc.
+ */
+export function analyzeBehaviorPatterns(focusStates = []) {
+  if (focusStates.length === 0) {
+    return {
+      peakDistractionTime: null,
+      commonDistractions: [],
+      typicalFocusBlockDuration: 0,
+      contextSwitchPattern: 'medium',
+    };
+  }
+
+  // Find peak distraction hours
+  const distractionHours = focusStates
+    .filter(s => s.state === 'distracted' || s.state === 'deeply_distracted')
+    .map(s => new Date(s.timestamp).getHours());
+
+  const hourCounts = {};
+  distractionHours.forEach(h => { hourCounts[h] = (hourCounts[h] || 0) + 1; });
+  const peakHour = Object.entries(hourCounts).sort(([, a], [, b]) => b - a)[0];
+  const peakDistractionTime = peakHour ? `${peakHour[0]}:00 - ${parseInt(peakHour[0]) + 1}:00` : null;
+
+  // Analyze focus block durations
+  const focusBlocks = [];
+  let currentBlockStart = null;
+  for (const state of focusStates) {
+    if (state.state === 'focused' && !currentBlockStart) {
+      currentBlockStart = state.timestamp;
+    } else if (state.state !== 'focused' && currentBlockStart) {
+      const duration = (new Date(state.timestamp) - new Date(currentBlockStart)) / 1000;
+      focusBlocks.push(duration);
+      currentBlockStart = null;
+    }
+  }
+
+  const typicalFocusBlockDuration = focusBlocks.length > 0
+    ? Math.round(focusBlocks.reduce((a, b) => a + b, 0) / focusBlocks.length)
+    : 0;
+
+  // Analyze context switching pattern
+  const switchCounts = focusStates
+    .map(s => s.signals?.contextSwitchFreq || 2.0)
+    .sort((a, b) => a - b);
+  const medianSwitches = switchCounts[Math.floor(switchCounts.length / 2)];
+  const contextSwitchPattern = medianSwitches < 2 ? 'low' : medianSwitches < 3.5 ? 'medium' : 'high';
+
+  return {
+    peakDistractionTime,
+    commonDistractions: [], // would be computed from session data
+    typicalFocusBlockDuration,
+    contextSwitchPattern,
   };
 }

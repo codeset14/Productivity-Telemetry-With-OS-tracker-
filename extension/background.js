@@ -19,6 +19,23 @@ const MIN_SESSION_SECONDS = 3;
 // ─── State ────────────────────────────────────────────────────────────────────
 let currentSession = null;
 
+// ─── Smart Distraction Warning State ───────────────────────────────────────────
+const DISTRACTION_WARNING_STATE = {
+  lastWarningPerSite: new Map(),     // site → timestamp
+  warningLevelPerSite: new Map(),    // site → 'soft' | 'strong'
+  cooldownMs: {
+    soft: 1 * 60 * 1000,   // 1 minute between soft warnings
+    strong: 5 * 60 * 1000, // 5 minutes between strong warnings
+    global: 30 * 1000,     // 30 seconds between any warnings
+  },
+  lastGlobalWarning: 0,
+};
+
+// ─── Behavioral Signal Tracking (for distraction detection) ──────────────────
+let visitedSitesIn10Min = new Map(); // site → count in last 10 minutes
+let lastInteractionTime = Date.now();
+let cumulativeIdleTime = 0;
+
 // ─── IndexedDB ────────────────────────────────────────────────────────────────
 function openDB() {
   return new Promise((resolve, reject) => {
@@ -207,6 +224,13 @@ async function endCurrentSession() {
     duration,
     interactions: currentSession.interactions || 0,
     tabSwitches:  currentSession.tabSwitches  || 0,
+    // NEW: Behavioral signals for distraction detection
+    clicks:       currentSession.clicks || 0,
+    scrolls:      currentSession.scrolls || 0,
+    keys:         currentSession.keys || 0,
+    pageLoads:    currentSession.pageLoads || 0,
+    idleTime:     currentSession.idleTime || 0,
+    repeatVisits: currentSession.repeatVisits || 0,
     userLabel:    null,
   };
 
@@ -251,7 +275,36 @@ async function startNewSession(url) {
     startTime:    Date.now(),
     interactions: 0,
     tabSwitches:  0,
+    // NEW: Behavioral signal tracking
+    clicks:       0,
+    scrolls:      0,
+    keys:         0,
+    pageLoads:    1, // new session = 1 page load
+    idleTime:     0,
+    repeatVisits: 0,
   };
+
+  // Track repeat visits to the same site (for distraction pattern detection)
+  const now = Date.now();
+  const key10MinAgo = now - 10 * 60 * 1000;
+  
+  // Clean up old visit records
+  for (const [site, visits] of visitedSitesIn10Min.entries()) {
+    visitedSitesIn10Min.set(site, visits.filter(t => t > key10MinAgo));
+    if (visitedSitesIn10Min.get(site).length === 0) {
+      visitedSitesIn10Min.delete(site);
+    }
+  }
+  
+  // Add current visit
+  if (!visitedSitesIn10Min.has(site)) {
+    visitedSitesIn10Min.set(site, []);
+  }
+  visitedSitesIn10Min.get(site).push(now);
+  currentSession.repeatVisits = visitedSitesIn10Min.get(site).length;
+
+  lastInteractionTime = now;
+  cumulativeIdleTime = 0;
 
   console.log("[FocusTracker] Session started:", site);
 }
@@ -390,6 +443,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       case "INTERACTION":
         if (currentSession) currentSession.interactions = (currentSession.interactions || 0) + 1;
+        lastInteractionTime = Date.now();
+        break;
+
+      // NEW: Behavioral signal tracking for distraction detection
+      case "CLICK":
+        if (currentSession) currentSession.clicks = (currentSession.clicks || 0) + 1;
+        lastInteractionTime = Date.now();
+        break;
+
+      case "SCROLL":
+        if (currentSession) currentSession.scrolls = (currentSession.scrolls || 0) + 1;
+        lastInteractionTime = Date.now();
+        break;
+
+      case "KEY":
+        if (currentSession) currentSession.keys = (currentSession.keys || 0) + 1;
+        lastInteractionTime = Date.now();
+        break;
+
+      case "PAGE_LOAD":
+        if (currentSession) currentSession.pageLoads = (currentSession.pageLoads || 0) + 1;
+        lastInteractionTime = Date.now();
+        break;
+
+      case "IDLE_DETECTED":
+        // Content script detected idle (no interaction for X seconds)
+        if (currentSession) currentSession.idleTime = (currentSession.idleTime || 0) + (msg.idleSeconds || 0);
         break;
 
       case "CONTINUE":
@@ -468,6 +548,91 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         console.log(`[FocusTracker] User continued past intervention on ${msg.site}`);
         sendResponse({ ok: true });
         break;
+
+      // ━━━ NEW: Smart Distraction Warning Trigger ━━━━━━━━━━━━━━━━━━━━━━━━━━
+      case "TRIGGER_DISTRACTION_WARNING": {
+        const { site, level, title, reason } = msg;
+        const now = Date.now();
+        const state = DISTRACTION_WARNING_STATE;
+
+        // Check global cooldown
+        if (now - state.lastGlobalWarning < state.cooldownMs.global) {
+          console.log(`[FocusTracker] Global cooldown active, skipping warning for ${site}`);
+          sendResponse({ ok: true });
+          break;
+        }
+
+        // Check per-site cooldown
+        const lastWarningTime = state.lastWarningPerSite.get(site) || 0;
+        const timeSinceLastWarning = now - lastWarningTime;
+        const previousLevel = state.warningLevelPerSite.get(site) || 'soft';
+        const cooldown = previousLevel === 'soft' ? state.cooldownMs.soft : state.cooldownMs.strong;
+
+        if (timeSinceLastWarning < cooldown) {
+          console.log(`[FocusTracker] Site cooldown active (${previousLevel}), skipping warning for ${site}`);
+          sendResponse({ ok: true });
+          break;
+        }
+
+        // Update state
+        state.lastWarningPerSite.set(site, now);
+        state.warningLevelPerSite.set(site, level || 'soft');
+        state.lastGlobalWarning = now;
+
+        // Determine which popup to render
+        const warningLevel = level || 'soft';
+        console.log(`[FocusTracker] Triggering ${warningLevel} warning for ${site}`);
+
+        // Send to all active tabs to show the appropriate popup
+        const tabs = await chrome.tabs.query({});
+        for (const tab of tabs) {
+          if (!tab.id) continue;
+          chrome.tabs.sendMessage(tab.id, {
+            type: 'SHOW_DISTRACTION_WARNING',
+            warningLevel,
+            site,
+            title,
+            reason,
+          }).catch(() => {});
+        }
+
+        // Log the warning
+        await logFocusEvent('distraction_warning_triggered', site);
+        console.log(`[FocusTracker] Distraction warning logged: ${site} (${warningLevel}, reason: ${reason})`);
+
+        sendResponse({ ok: true, queued: true });
+        break;
+      }
+
+      case "DISTRACTION_WARNING_ACTION": {
+        const { action, site } = msg;
+        console.log(`[FocusTracker] Distraction warning action: ${action} on ${site}`);
+        
+        switch (action) {
+          case 'stay_focused':
+            await logFocusEvent('distraction_warning_stay_focused', site);
+            break;
+          case 'dismissed':
+            await logFocusEvent('distraction_warning_dismissed', site);
+            break;
+          case 'reset_focus':
+            await logFocusEvent('distraction_warning_reset_focus', site);
+            break;
+          case 'end_session':
+            await logFocusEvent('distraction_warning_end_session', site);
+            await setSetting('focusEnabled', false);
+            await setSetting('sessionStart', null);
+            await endCurrentSession();
+            // Broadcast end to all tabs
+            const tabs = await chrome.tabs.query({});
+            tabs.forEach(t => t.id && chrome.tabs.sendMessage(t.id, { type: 'FOCUS_ENDED', reason: 'distraction_override' }).catch(() => {}));
+            break;
+        }
+        
+        sendResponse({ ok: true });
+        break;
+      }
+      // ━━━ END NEW ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     }
   })();
   return true;

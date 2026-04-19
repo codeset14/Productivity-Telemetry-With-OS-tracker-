@@ -133,10 +133,14 @@ function buildRecommendation(data) {
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
-export function generateReport(data) {
+/**
+ * @param {object} data — ProcessedData from engine.js
+ * @param {Array}  [behaviorPatterns] — patterns from behaviorEngine.detectPatterns()
+ */
+export function generateReport(data, behaviorPatterns = []) {
   return {
     summary: buildSummary(data),
-    findings: buildFindings(data),
+    findings: [...buildFindings(data), ...behaviorPatterns],
     recommendation: buildRecommendation(data),
   };
 }
